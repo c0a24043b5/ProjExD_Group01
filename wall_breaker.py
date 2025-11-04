@@ -8,14 +8,14 @@ import math  # 標準のmathモジュールを追加
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
 # --- 定数設定 ---
-SCREEN_WIDTH = 800
-SCREEN_HEIGHT = 600
-PADDLE_WIDTH = 100
-PADDLE_HEIGHT = 20
-BALL_RADIUS = 10
-BLOCK_WIDTH = 75
-BLOCK_HEIGHT = 30
-FPS = 60
+SCREEN_WIDTH = 800  # 画面の横幅
+SCREEN_HEIGHT = 600 # 画面の縦幅
+PADDLE_WIDTH = 100 # ラケットの横幅
+PADDLE_HEIGHT = 20 # ラケットの縦幅
+BALL_RADIUS = 10   # ボールの半径
+BLOCK_WIDTH = 69   # ブロックの横幅
+BLOCK_HEIGHT = 30  # ブロックの縦幅
+FPS = 60           # フレームレート
 
 # 色定義
 BLACK = (0, 0, 0)
@@ -58,6 +58,10 @@ def load_sounds():
     
     return sounds
 PURPLE = (200, 0, 200)
+ORANGE = (255, 120, 0)
+
+HP3_PROBABILITY = 0.20 # 10%の確率でHP 3 (超高耐久・超高得点)
+HP2_PROBABILITY = 0.30 # 20%の確率でHP 2 (高耐久・高得点)
 
 # --- クラス定義 ---
 
@@ -170,32 +174,47 @@ class Ball:
 
 
         # ブロックとの衝突判定
-        collided_block = self.rect.collidelist(blocks) 
-        if collided_block != -1: 
-            block = blocks.pop(collided_block) # 衝突したブロックをリストから削除
+        collided_index = self.rect.collidelist(blocks) 
+        if collided_index != -1: 
+            # 💡 (1) 衝突したブロックをインデックスで削除し、blockに代入
+            block = blocks.pop(collided_index) 
             
             # --- ▼ 貫通状態の処理 ▼ ---
             if self.penetrate:
                 # 貫通状態なら反射しない (ブロックは消えるだけ)
-                pass 
+                is_destroyed = True # 貫通状態では即座に破壊と見なす
             else:
                 # 通常時は反射する
                 self.vy *= -1
-            # --- ▲ ------------------ ▲ ---
-            
-            # --- ▼ 戻り値を変更 ▼ ---
-            # パーティクルエフェクトの生成（衝突したブロックの中心から）
-            for _ in range(10):  # 10個のパーティクルを生成
-                particles.append(
-                    Particle(block.centerx, block.centery, (*WHITE, 255))
-                )
-            
-            # 効果音の再生
-            if break_sound is not None:
-                break_sound.play()
-            
-            return True, block # ブロックに当たったことと、壊したブロックを返す
-            # --- ▲ ---------------- ▲ ---
+
+                # ブロックの耐久度を減らす
+                block.hp -= 1
+                
+                # 💡 (2) 破壊されたかどうかを判定
+                if block.hp <= 0:
+                    is_destroyed = True
+                else:
+                    is_destroyed = False
+                    
+                    # 💡 (3) HPが残っている場合は、ブロックをリストに戻し、処理を終了
+                    blocks.insert(collided_index, block)
+                    return False, None # 破壊されていない
+
+            # 💡 (4) ブロックが破壊された（is_destroyed = True）場合のみ、以下の処理を実行
+            if is_destroyed:
+                hit_score = block.score_value # スコアを取得
+                
+                # パーティクルエフェクトの生成（衝突したブロックの中心から）
+                for _ in range(10):  # 10個のパーティクルを生成
+                    particles.append(
+                        Particle(block.centerx, block.centery, (*WHITE, 255))
+                    )
+                
+                # 効果音の再生
+                if break_sound is not None:
+                    break_sound.play()
+                
+                return True, block # ブロックに当たったこと（破壊）と、壊したブロックを返すd
         
         # --- ▼ アイテムタイマーの更新 ▼ ---
         if self.is_large:
@@ -252,13 +271,31 @@ class Ball:
         self.rect.center = center # 中心を再設定
 
 class Block(pg.Rect):
-    def __init__(self, x, y, color):
+    """ ブロックのクラス (pg.Rectを継承) """
+    def __init__(self, x, y, color, hp=1, score_value=10):
         super().__init__(x, y, BLOCK_WIDTH, BLOCK_HEIGHT)
-        self.color = color
-        # (ここに hp や is_item_block などの属性が追加される)
+        self.max_hp = hp      # 最大耐久度
+        self.hp = hp          # 現在の耐久度
+        self.color = color    # 現在の色a
+        self.base_color = color # 元の色
+        self.score_value = score_value # 破壊時の得点
 
     def draw(self, screen):
-        pg.draw.rect(screen, self.color, self)
+        #pg.draw.rect(screen, self.color, self)
+        """ ブロックを画面に描画 """
+        if self.hp > 1:
+            color_to_draw = self.base_color
+            if self.hp == 2:
+                color_to_draw = ORANGE
+            elif self.hp > 2:
+                color_to_draw = RED 
+        else:
+            color_to_draw = self.base_color
+        
+        pg.draw.rect(screen, color_to_draw, self)
+        if self.hp > 1:
+            pg.draw.rect(screen, WHITE, self, 3)
+         
 
 class item1:
     """
@@ -378,7 +415,7 @@ class Item2(pg.Rect):
     def draw(self, screen):
         """ アイテムを描画する（色分け） """
         pg.draw.rect(screen, self.color, self)
-
+    
     def check_collision(self, paddle_rect):
         """ ラケットとの衝突を判定する """
         return self.colliderect(paddle_rect)
@@ -455,11 +492,31 @@ def create_block_row(y: int) -> list[Block]:
     戻り値: 生成したブロックのリスト
     """
     new_blocks = []
+    base_color = WHITE 
+    
+    # グローバルな確率定数を使用
+
     for x in range(10):  # 10列
+        hp = 1
+        score_value = 10 
+        rand_val = random.random()
+
+        if rand_val < HP3_PROBABILITY:
+            hp = 3
+            score_value = 50
+        elif rand_val < HP3_PROBABILITY + HP2_PROBABILITY:
+            hp = 2
+            score_value = 30
+        else:
+            hp = 1
+            score_value = 10
+
         block = Block(
-            x * (BLOCK_WIDTH + 5) + 20,  # X座標 (隙間5px, 左マージン20px)
+            x * (BLOCK_WIDTH + 8) + 20,  # X座標 (隙間5px, 左マージン20px)
             y,  # 指定されたY座標
-            WHITE  # 白色で統一
+            base_color, 
+            hp=hp, 
+            score_value=score_value
         )
         new_blocks.append(block)
     return new_blocks
@@ -510,9 +567,36 @@ def main():
     # --- ▲ ------------------- ▲ ---
 
     # ... (ブロックの配置 はそのまま) ...
-    block_colors = [RED, YELLOW, GREEN, BLUE]
+    # block_colors = [RED, YELLOW, GREEN, BLUE]
+
+    # HP3_PROBABILITY = 0.20 # 10%の確率でHP 3 (超高耐久・超高得点)
+    # HP2_PROBABILITY = 0.30 # 20%の確率でHP 2 (高耐久・高得点)
+
     for y in range(4): 
-        blocks.extend(create_block_row(y * (BLOCK_HEIGHT + 5) + 30))
+        for x in range(10): 
+            hp = 1
+            score_value = 10 
+            rand_val = random.random()
+
+            if rand_val < HP3_PROBABILITY:
+                hp = 3
+                score_value = 50
+            elif rand_val < HP3_PROBABILITY + HP2_PROBABILITY:
+                hp = 2
+                score_value = 30
+            else:
+                hp = 1
+                score_value = 10
+            color = WHITE
+                
+            block = Block(
+                x * (BLOCK_WIDTH + 8) + 20, # <--- 隙間を広げ、配置を見やすく調整
+                y * (BLOCK_HEIGHT + 5) + 30, 
+                color,
+                hp=hp,             
+                score_value=score_value
+            )
+            blocks.append(block)
 
     score = 0
     life = 3
